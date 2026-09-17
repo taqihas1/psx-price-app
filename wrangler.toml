@@ -8,6 +8,10 @@ kv_namespaces = [
   { binding = "PSX_HISTORY", id = "REPLACE_WITH_YOUR_KV_ID" }
 ]
 
+# Symbols to track — update this list freely (comma-separated, no spaces needed)
+[vars]
+SYMBOLS = "SAZEW,MARI,PPL,OGDC"
+
 # Daily at 12:00 UTC = 5:00 PM PKT (PSX closes 3:30 PM PKT)
 [triggers]
 crons = ["0 12 * * *"]

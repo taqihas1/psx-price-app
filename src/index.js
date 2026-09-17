@@ -2,15 +2,18 @@
 // PSX Price Tracker — Cloudflare Worker
 //
 // Endpoints:
-//   GET /              -> live dashboard (HTML, auto-refresh)
-//   GET /api/prices    -> live prices JSON (TradingView primary, PSX fallback)
-//   GET /api/history?symbol=PPL -> stored daily history from KV
-//   GET /api/snapshot  -> manual daily save (for testing the cron path)
+//   GET /                                   -> live dashboard (HTML, auto-refresh)
+//   GET /api/prices                         -> live prices JSON (configured symbols)
+//   GET /api/prices?symbols=ENGRO,HBL      -> live prices for ad-hoc symbols
+//   GET /api/history?symbol=PPL             -> stored daily history from KV
+//   GET /api/snapshot                       -> manual daily save (test the cron)
+//   GET /api/symbols                        -> current configured symbol list
 //
+// Symbol list is configured via the SYMBOLS var (wrangler.toml / dashboard).
 // Cron: daily at 12:00 UTC = 5:00 PM PKT (PSX closes 3:30 PM PKT)
 // ============================================================================
 
-const SYMBOLS = ["SAZEW", "MARI", "PPL", "OGDC"];
+const DEFAULT_SYMBOLS = ["SAZEW", "MARI", "PPL", "OGDC"];
 const TV_SCAN_URL = "https://scanner.tradingview.com/pakistan/scan";
 
 const HEADERS = {
@@ -24,11 +27,26 @@ const HEADERS = {
 const COL = { NAME: 0, CLOSE: 1, HIGH: 2, LOW: 3, VOLUME: 4, CHANGE: 5 };
 
 // ----------------------------------------------------------------------------
+// Symbol list: from env var (comma-separated), with sane fallback
+// ----------------------------------------------------------------------------
+function parseSymbols(raw) {
+  const list = String(raw || "")
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+  return list.length ? list : DEFAULT_SYMBOLS.slice();
+}
+
+function getSymbols(env) {
+  return parseSymbols(env.SYMBOLS);
+}
+
+// ----------------------------------------------------------------------------
 // Price fetching
 // ----------------------------------------------------------------------------
-async function fetchFromTradingView() {
+async function fetchFromTradingView(symbols) {
   const payload = {
-    symbols: { tickers: SYMBOLS.map((s) => `PSX:${s}`), query: { types: [] } },
+    symbols: { tickers: symbols.map((s) => `PSX:${s}`), query: { types: [] } },
     columns: ["name", "close", "high", "low", "volume", "change"],
   };
 
@@ -82,17 +100,17 @@ async function fetchFromPSX(symbol) {
   };
 }
 
-async function getAllPrices() {
+async function getAllPrices(symbols) {
   let tvData = null;
   try {
-    tvData = await fetchFromTradingView();
+    tvData = await fetchFromTradingView(symbols);
   } catch (e) {
     console.error("TradingView failed:", e.message);
   }
 
   const results = {};
   await Promise.all(
-    SYMBOLS.map(async (sym) => {
+    symbols.map(async (sym) => {
       if (tvData && tvData[sym]) {
         results[sym] = tvData[sym];
         return;
@@ -111,7 +129,7 @@ async function getAllPrices() {
 // ----------------------------------------------------------------------------
 // KV history
 // ----------------------------------------------------------------------------
-async function saveDailySnapshot(env, prices) {
+async function saveDailySnapshot(env, symbols, prices) {
   const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
 
   let index = [];
@@ -120,11 +138,13 @@ async function saveDailySnapshot(env, prices) {
   } catch (_) {}
   if (!index.includes(date)) index.push(date);
 
-  const ops = SYMBOLS.map((sym) => {
-    const p = prices[sym];
-    if (!p || p.error) return null;
-    return env.PSX_HISTORY.put(`${date}:${sym}`, JSON.stringify(p));
-  }).filter(Boolean);
+  const ops = symbols
+    .map((sym) => {
+      const p = prices[sym];
+      if (!p || p.error) return null;
+      return env.PSX_HISTORY.put(`${date}:${sym}`, JSON.stringify(p));
+    })
+    .filter(Boolean);
 
   ops.push(env.PSX_HISTORY.put("index", JSON.stringify(index)));
   await Promise.all(ops);
@@ -162,7 +182,7 @@ const jsonResponse = (data, status = 200) =>
 // ----------------------------------------------------------------------------
 // Dashboard HTML
 // ----------------------------------------------------------------------------
-function dashboardHtml() {
+function dashboardHtml(symbols) {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -185,6 +205,10 @@ function dashboardHtml() {
   button { background:var(--accent); color:#04121f; border:0; padding:8px 16px;
            border-radius:8px; font-weight:600; cursor:pointer; font-size:13px; }
   button:hover { filter:brightness(1.1); }
+  .toolbar { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; }
+  .toolbar input { background:var(--card); border:1px solid var(--border);
+                   color:var(--txt); padding:8px 12px; border-radius:8px;
+                   font-size:13px; min-width:280px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
           gap:16px; }
   .card { background:var(--card); border:1px solid var(--border);
@@ -201,7 +225,6 @@ function dashboardHtml() {
          letter-spacing:1px; }
   canvas { width:100%; height:40px; margin-top:10px; }
   #status { margin-top:16px; text-align:center; color:var(--dim); font-size:12px; }
-  a { color:var(--accent); text-decoration:none; }
 </style>
 </head>
 <body>
@@ -215,11 +238,17 @@ function dashboardHtml() {
       <button onclick="saveSnapshot()">Save Daily Snapshot</button>
     </div>
   </header>
+  <div class="toolbar">
+    <input id="symInput" placeholder="Custom symbols, comma-separated (e.g. ENGRO,HBL)"
+           onkeydown="if(event.key==='Enter')loadCustom()">
+    <button onclick="loadCustom()">Load</button>
+    <button onclick="load()">Reset</button>
+  </div>
   <div class="grid" id="cards"></div>
   <div id="status">Auto-refresh every 60s · Data: TradingView / PSX</div>
 </div>
 <script>
-var SYMBOLS = ${JSON.stringify(SYMBOLS)};
+var SYMBOLS = ${JSON.stringify(symbols)};
 
 function fmt(n) {
   if (n == null) return "N/A";
@@ -252,10 +281,10 @@ function sparkline(canvas, rows) {
   ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 3; ctx.stroke();
 }
 
-function render(prices) {
+function render(prices, syms) {
   var grid = document.getElementById("cards");
   grid.innerHTML = "";
-  SYMBOLS.forEach(function(sym, idx) {
+  (syms || SYMBOLS).forEach(function(sym) {
     var p = prices[sym] || {};
     var chg = p.change_pct;
     var cls = chg == null ? "" : (chg >= 0 ? "up" : "down");
@@ -286,10 +315,18 @@ function render(prices) {
 function load() {
   fetch("/api/prices")
     .then(function(r){ return r.json(); })
-    .then(render)
+    .then(function(j){ render(j.prices, j.symbols); })
     .catch(function(e){
       document.getElementById("updated").textContent = "Error loading prices";
     });
+}
+
+function loadCustom() {
+  var v = document.getElementById("symInput").value.trim();
+  if (!v) { load(); return; }
+  fetch("/api/prices?symbols=" + encodeURIComponent(v))
+    .then(function(r){ return r.json(); })
+    .then(function(j){ render(j.prices, j.symbols); });
 }
 
 function saveSnapshot() {
@@ -319,9 +356,18 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
+    // Ad-hoc symbol override via ?symbols=ENGRO,HBL
+    const override = url.searchParams.get("symbols");
+    const symbols = override ? parseSymbols(override) : getSymbols(env);
+
     switch (url.pathname) {
-      case "/api/prices":
-        return jsonResponse(await getAllPrices());
+      case "/api/symbols":
+        return jsonResponse({ symbols: getSymbols(env) });
+
+      case "/api/prices": {
+        const prices = await getAllPrices(symbols);
+        return jsonResponse({ symbols, prices });
+      }
 
       case "/api/history": {
         const sym = (url.searchParams.get("symbol") || "PPL").toUpperCase();
@@ -329,13 +375,13 @@ export default {
       }
 
       case "/api/snapshot": {
-        const prices = await getAllPrices();
-        const saved = await saveDailySnapshot(env, prices);
+        const prices = await getAllPrices(getSymbols(env));
+        const saved = await saveDailySnapshot(env, getSymbols(env), prices);
         return jsonResponse({ ok: true, ...saved });
       }
 
       default:
-        return new Response(dashboardHtml(), {
+        return new Response(dashboardHtml(getSymbols(env)), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
     }
@@ -343,8 +389,9 @@ export default {
 
   // Cron: 12:00 UTC = 5:00 PM PKT (post-market close)
   async scheduled(event, env) {
-    const prices = await getAllPrices();
-    await saveDailySnapshot(env, prices);
-    console.log("Daily snapshot saved at", new Date().toISOString());
+    const symbols = getSymbols(env);
+    const prices = await getAllPrices(symbols);
+    await saveDailySnapshot(env, symbols, prices);
+    console.log("Daily snapshot saved at", new Date().toISOString(), "symbols:", symbols.join(","));
   },
 };

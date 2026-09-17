@@ -35,11 +35,31 @@ After deploy you'll get a URL like `https://psx-price-app.<your-subdomain>.worke
 
 ## Customizing Symbols
 
-Edit `SYMBOLS` at the top of `src/index.js`:
+Symbols live in the `SYMBOLS` var — edit `wrangler.toml` and push:
 
-```js
-const SYMBOLS = ["SAZEW", "MARI", "PPL", "OGDC", "ENGRO"];
+```toml
+[vars]
+SYMBOLS = "SAZEW,MARI,PPL,OGDC,ENGRO,HBL"
 ```
+
+Or update without touching the repo (immediate, no redeploy):
+
+```bash
+npx wrangler vars put SYMBOLS --value "SAZEW,MARI,PPL,OGDC,ENGRO"
+```
+
+Or in the Cloudflare dashboard → Workers → psx-price-app → Settings → Variables.
+
+**Ad-hoc queries** (no config change needed):
+
+```
+GET /api/prices?symbols=ENGRO,HBL
+```
+
+The dashboard also has a symbol input box for one-off lookups.
+Current configured list: `GET /api/symbols`.
+
+The daily cron snapshot uses the configured `SYMBOLS` list (not ad-hoc queries).
 
 ## Free Tier Limits (plenty for this use case)
 
