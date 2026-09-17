@@ -1,0 +1,13 @@
+{
+  "name": "psx-price-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PSX price tracker — Cloudflare Worker with live dashboard, API, and daily KV history",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
